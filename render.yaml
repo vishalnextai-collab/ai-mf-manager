@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: ai-mf-manager
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: GENERIC_TIMEZONE
+        value: Asia/Kolkata
+      - key: NODE_ENV
+        value: production
+      - key: N8N_ENCRYPTION_KEY
+        generateValue: true
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: "true"
+      - key: N8N_BASIC_AUTH_USER
+        value: "admin"
+      - key: N8N_BASIC_AUTH_PASSWORD
+        value: "supersecurepassword"
+      - key: TELEGRAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: YH_FINANCE
+        sync: false
+      - key: USE_ELEVENLABS
+        value: "true"
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: COQUI_VOICE
+        value: en-US-Wavenet-A

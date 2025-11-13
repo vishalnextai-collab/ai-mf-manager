@@ -1,0 +1,355 @@
+{
+  "name": "AI Mutual Fund Manager v5 (Parallel APIs + Voice + LLM)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ]
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [100, 200],
+      "credentials": { "telegramApi": "Telegram Bot" }
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const msg = $json.message || {};\nconst chatId = msg.chat?.id;\nconst isVoice = !!msg.voice || !!msg.audio || !!msg.document;\nconst file_id = msg.voice?.file_id || msg.audio?.file_id || msg.document?.file_id || null;\nconst text = msg.text || '';\nreturn [{ json: { chatId, isVoice, file_id, text } }];"
+      },
+      "name": "Parse Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [300, 200]
+    },
+
+    {
+      "parameters": {
+        "conditions": { "boolean": [{ "value1": "={{$json.isVoice}}", "operation": "isTrue" }] }
+      },
+      "name": "If Voice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [520, 200]
+    },
+
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_API_KEY}}/getFile?file_id={{$json.file_id}}",
+        "method": "GET",
+        "responseFormat": "json"
+      },
+      "name": "Get Voice FileInfo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [760, 80]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const filePath = $node['Get Voice FileInfo'].json.result?.file_path;\nif (!filePath) throw new Error('file_path missing');\nconst url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_API_KEY}/${filePath}`;\nreturn [{ json: { chatId: $json.chatId, fileUrl: url } }];"
+      },
+      "name": "Build Voice Download URL",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [980, 80]
+    },
+
+    {
+      "parameters": {
+        "url": "={{$json.fileUrl}}",
+        "method": "GET",
+        "responseFormat": "file",
+        "binaryPropertyName": "audioFile"
+      },
+      "name": "Download Voice File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1200, 80]
+    },
+
+    {
+      "parameters": {
+        "url": "https://api.groq.com/openai/v1/audio/transcriptions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{$env.GROQ_API_KEY}}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "whisper-large-v3" },
+            { "name": "file", "value": "={{$binary.audioFile.data}}" }
+          ]
+        },
+        "options": { "binaryData": true }
+      },
+      "name": "Groq Whisper STT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1440, 80]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const stt = $node['Groq Whisper STT'].json?.text || $node['Groq Whisper STT'].json?.transcript || '';\nconst raw = (stt || $json.text || '').toString().trim();\n// extract first 'analyze <name>' occurrence\nconst match = raw.match(/analyze\\s+(.+)/i);\nif (!match) return [{ json: { chatId: $json.chatId, error: 'no_fund_in_query', raw } }];\nconst fund = match[1].trim();\nreturn [{ json: { chatId: $json.chatId, fund, raw } }];"
+      },
+      "name": "Extract Fund from STT/Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1680, 80]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const raw = $json.text || '';\nconst match = (raw || '').toString().match(/analyze\\s+(.+)/i);\nif (!match) return [{ json: { chatId: $json.chatId, error: 'no_fund_in_text', raw } }];\nreturn [{ json: { chatId: $json.chatId, fund: match[1].trim(), raw } }];"
+      },
+      "name": "Extract Fund from Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1680, 320]
+    },
+
+    {
+      "parameters": { "mode": "pass-through" },
+      "name": "Merge STT/Text",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 1,
+      "position": [1920, 200]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const item = $input.first().json;\nif (item.error) return [{ json: { chatId: item.chatId, error: item.error, raw: item.raw } }];\nreturn [{ json: { chatId: item.chatId, fund: item.fund } }];"
+      },
+      "name": "Normalize Extracted",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2120, 200]
+    },
+
+    {
+      "parameters": {
+        "url": "https://api.mfapi.in/mf/search",
+        "method": "GET",
+        "qs": { "q": "={{$json.fund}}" },
+        "responseFormat": "json"
+      },
+      "name": "MFAPI Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [2360, 80]
+    },
+
+    {
+      "parameters": {
+        "url": "={{'https://query1.finance.yahoo.com/v10/finance/quoteSummary/' + encodeURIComponent($json.fund) + '.NS'}}",
+        "method": "GET",
+        "qs": { "modules": "summaryDetail,defaultKeyStatistics" },
+        "responseFormat": "json"
+      },
+      "name": "Yahoo Finance",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [2360, 320]
+    },
+
+    {
+      "parameters": { "mode": "mergeByIndex" },
+      "name": "Merge Parallel Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 1,
+      "position": [2600, 200]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "// Merge results safely and produce a clean 'data' object\nconst mfArr = $node['MFAPI Search'].json || [];\nconst yf = $node['Yahoo Finance'].json?.quoteSummary?.result?.[0] || {};\nconst mf = mfArr[0] || {};\nconst scheme_code = mf.schemeCode || mf.scheme_code || mf.scheme_code_str || null;\nconst nav = mf.data?.[0]?.nav || (yf.summaryDetail?.navPrice?.raw || 'N/A');\nconst aum = (yf.defaultKeyStatistics?.totalAssets?.raw) || mf.meta?.aum || 'N/A';\nconst expense = (yf.summaryDetail?.expenseRatio?.raw) || mf.meta?.expense_ratio || 'N/A';\nconst returns = (mf.meta && mf.meta['returns']) || { '1Y': mf.meta?.'1Y' || 'N/A' };\n\nconst portfolio = (scheme_code) ? (await $httpRequest({ url: `https://api.mfapi.in/mf/${scheme_code}/portfolio`, method: 'GET', responseFormat: 'json' })).json : (mf.portfolio || {});\n\nconst top10 = portfolio.holdings ? portfolio.holdings.slice(0,10).map(h => `${h.name || h.stock || h.stock_name || 'Unknown'} ${(h.percent||h.weight||0)}%`).join(', ') : 'N/A';\n\nreturn [{ json: {\n  chatId: $json.chatId,\n  fundName: mf.schemeName || mf.scheme_name || $json.fund,\n  schemeCode: scheme_code,\n  nav: nav,\n  aum: aum,\n  expense: expense,\n  returns: mf.returns || { '1Y': 'N/A','3Y':'N/A','5Y':'N/A' },\n  top10: top10,\n  raw_mf: mf,\n  raw_yf: yf\n} }];"
+      },
+      "name": "Build Combined Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2840, 200]
+    },
+
+    {
+      "parameters": {
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": [
+          { "name": "Authorization", "value": "Bearer {{$env.GROQ_API_KEY}}" },
+          { "name": "Content-Type", "value": "application/json" }
+        ],
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "mixtral-8x7b-32768" },
+            {
+              "name": "messages",
+              "value": "={{JSON.stringify([{ role: 'system', content: 'You are an expert mutual fund analyst for Indian retail investors. Use provided MFAPI and Yahoo Finance combined data to write a concise 3-paragraph summary: (1) Overview & performance, (2) Risk & portfolio quality, (3) Actionable recommendation with SIP suggestion. Use emojis and simple language.' }, { role: 'user', content: JSON.stringify($json) }])}}"
+            },
+            { "name": "temperature", "value": "0.2" }
+          ]
+        }
+      },
+      "name": "Groq LLM Synthesis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [3080, 200]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "const lmsg = $node['Groq LLM Synthesis'].json.choices?.[0]?.message?.content || $node['Groq LLM Synthesis'].json || '';\nconst data = $json;\n// rule-based scoring\nlet score = 0; const reasons = [];\nif (data.aum !== 'N/A' && parseFloat(String(data.aum).replace(/[^0-9.]/g,'')) > 5000) { score++; reasons.push('Large AUM'); }\nif (data.returns && data.returns['5Y'] && parseFloat(data.returns['5Y']) > 20) { score++; reasons.push('Strong 5Y'); }\nif (data.expense !== 'N/A' && parseFloat(String(data.expense)) < 1) { score++; reasons.push('Low expense'); }\nif (data.top10 && data.top10 !== 'N/A') { score++; }\nconst verdict = score >= 3 ? 'BUY' : score === 2 ? 'HOLD' : 'AVOID';\nconst finalText = `*${verdict}*\\n\\n${lmsg}\\n\\n*Key metrics:* NAV: ₹${data.nav} | AUM: ${data.aum} | Expense: ${data.expense}\\nTop holdings: ${data.top10}`;\nreturn [{ json: { chatId: data.chatId, verdict, summary: lmsg, finalText, binaryForTts: finalText } }];"
+      },
+      "name": "Verdict & Prepare Reply",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [3320, 200]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "return [{ json: { useEleven: (process.env.USE_ELEVENLABS === 'true') } }];"
+      },
+      "name": "Decide TTS Provider",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [3560, 200]
+    },
+
+    {
+      "parameters": {
+        "conditions": { "boolean": [{ "value1": "={{$json.useEleven}}", "operation": "isTrue" }] }
+      },
+      "name": "IF ElevenLabs?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [3760, 200]
+    },
+
+    {
+      "parameters": {
+        "url": "={{'https://api.elevenlabs.io/v1/text-to-speech/' + $env.ELEVENLABS_VOICE_ID}}",
+        "method": "POST",
+        "headers": {
+          "xi-api-key": "={{$env.ELEVENLABS_API_KEY}}",
+          "Content-Type": "application/json",
+          "Accept": "audio/mpeg"
+        },
+        "body": {
+          "text": "={{$node['Verdict & Prepare Reply'].json.finalText}}",
+          "model_id": "eleven_multilingual_v2"
+        },
+        "responseFormat": "file"
+      },
+      "name": "ElevenLabs TTS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [4000, 120]
+    },
+
+    {
+      "parameters": {
+        "url": "https://app.coqui.ai/api/v2/tts",
+        "method": "POST",
+        "headers": { "Content-Type": "application/json" },
+        "body": { "voice": "={{$env.COQUI_VOICE}}", "text": "={{$node['Verdict & Prepare Reply'].json.finalText}}" },
+        "responseFormat": "file"
+      },
+      "name": "Coqui TTS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [4000, 280]
+    },
+
+    {
+      "parameters": {
+        "chatId": "={{$json.chatId}}",
+        "text": "={{$json.finalText}}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "name": "Send Text Reply (Telegram)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [4280, 200],
+      "credentials": { "telegramApi": "Telegram Bot" }
+    },
+
+    {
+      "parameters": {
+        "binaryPropertyName": "data",
+        "chatId": "={{$json.chatId}}",
+        "additionalFields": { "caption": "Audio summary (tap to play)" }
+      },
+      "name": "Send Voice Reply (Telegram)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [4520, 200],
+      "credentials": { "telegramApi": "Telegram Bot" }
+    },
+
+    {
+      "parameters": {
+        "functionCode": "// map ElevenLabs binary to item so Send Voice node sees it as binary.data\nitems[0].binary = items[0].binary || {};\nif ($node['ElevenLabs TTS'].binary && $node['ElevenLabs TTS'].binary.data) {\n  items[0].binary.data = $node['ElevenLabs TTS'].binary.data;\n} else if ($node['Coqui TTS'].binary && $node['Coqui TTS'].binary.data) {\n  items[0].binary.data = $node['Coqui TTS'].binary.data;\n}\nreturn items;",
+        "alwaysOutputData": false
+      },
+      "name": "Attach TTS Binary",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [4400, 200]
+    },
+
+    {
+      "parameters": {
+        "functionCode": "return [{ json: { ok: true } }];"
+      },
+      "name": "Finish",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [4760, 200]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": { "main": [[{ "node": "Parse Context", "type": "main" }]] },
+    "Parse Context": { "main": [[{ "node": "If Voice?", "type": "main" }]] },
+    "If Voice?": {
+      "main": [[{ "node": "Get Voice FileInfo", "type": "main" }]],
+      "alternate": [[{ "node": "Extract Fund from Text", "type": "main" }]]
+    },
+    "Get Voice FileInfo": { "main": [[{ "node": "Build Voice Download URL", "type": "main" }]] },
+    "Build Voice Download URL": { "main": [[{ "node": "Download Voice File", "type": "main" }]] },
+    "Download Voice File": { "main": [[{ "node": "Groq Whisper STT", "type": "main" }]] },
+    "Groq Whisper STT": { "main": [[{ "node": "Extract Fund from STT/Text", "type": "main" }]] },
+    "Extract Fund from STT/Text": { "main": [[{ "node": "Merge STT/Text", "type": "main" }]] },
+    "Extract Fund from Text": { "main": [[{ "node": "Merge STT/Text", "type": "main" }]] },
+    "Merge STT/Text": { "main": [[{ "node": "Normalize Extracted", "type": "main" }]] },
+    "Normalize Extracted": { "main": [[{ "node": "MFAPI Search", "type": "main" }, { "node": "Yahoo Finance", "type": "main" }]] },
+    "MFAPI Search": { "main": [[{ "node": "Merge Parallel Data", "type": "main" }]] },
+    "Yahoo Finance": { "main": [[{ "node": "Merge Parallel Data", "type": "main" }]] },
+    "Merge Parallel Data": { "main": [[{ "node": "Build Combined Data", "type": "main" }]] },
+    "Build Combined Data": { "main": [[{ "node": "Groq LLM Synthesis", "type": "main" }]] },
+    "Groq LLM Synthesis": { "main": [[{ "node": "Verdict & Prepare Reply", "type": "main" }]] },
+    "Verdict & Prepare Reply": { "main": [[{ "node": "Decide TTS Provider", "type": "main" }]] },
+    "Decide TTS Provider": { "main": [[{ "node": "IF ElevenLabs?", "type": "main" }]] },
+    "IF ElevenLabs?": {
+      "main": [[{ "node": "ElevenLabs TTS", "type": "main" }]],
+      "alternate": [[{ "node": "Coqui TTS", "type": "main" }]]
+    },
+    "ElevenLabs TTS": { "main": [[{ "node": "Attach TTS Binary", "type": "main" }]] },
+    "Coqui TTS": { "main": [[{ "node": "Attach TTS Binary", "type": "main" }]] },
+    "Attach TTS Binary": { "main": [[{ "node": "Send Text Reply (Telegram)", "type": "main" }, { "node": "Send Voice Reply (Telegram)", "type": "main" }]] },
+    "Send Text Reply (Telegram)": { "main": [[{ "node": "Finish", "type": "main" }]] },
+    "Send Voice Reply (Telegram)": { "main": [[{ "node": "Finish", "type": "main" }]] }
+  },
+  "active": true
+}
